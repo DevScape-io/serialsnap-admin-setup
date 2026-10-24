@@ -34,3 +34,5 @@ from disk instead of using the hosted page.
 
 The bundled QR generator is [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)
 by Kazuhiko Arase, under the MIT License.
+
+SerialSnap admin setup is released under the [MIT License](LICENSE).
