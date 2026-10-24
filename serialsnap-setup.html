@@ -39,7 +39,7 @@
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 14px; }
   label.field { display: block; margin-bottom: 14px; }
   label.field span { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
-  input[type=text] {
+  input[type=text], input.passcode {
     width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
     background: var(--field); color: var(--text); font: inherit;
   }
@@ -94,6 +94,12 @@
     background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto;
     font-size: 12.5px; margin: 10px 0 0; white-space: pre;
   }
+  .lock { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .lock .toggle { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+  .lock .toggle b { display: block; font-size: 15px; }
+  .lock .toggle small { color: var(--muted); font-size: 13px; }
+  .passcode-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  input.passcode { width: 13em; max-width: 100%; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 20px; letter-spacing: 0.08em; text-align: center; padding: 8px 10px; }
   details summary { cursor: pointer; font-weight: 600; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
@@ -107,7 +113,7 @@
 
   <div class="privacy" role="note">
     <span aria-hidden="true">🔒</span>
-    <div><b>Everything stays in this browser.</b> This page makes no network requests (its security policy blocks them) and saves nothing. The QR code can contain your organization's private key, so treat it like the .pem file: show it only to the technician who's scanning, and don't print, screenshot or share it.</div>
+    <div><b>Everything stays in this browser.</b> This page makes no network requests (its security policy blocks them) and saves nothing. The QR code can contain your organization's private key. Lock it with a passcode (step 3) and give the passcode separately; an unlocked code is as sensitive as the .pem file, so show it only to the technician who's scanning and don't print, screenshot or share it.</div>
   </div>
 
   <div class="grid">
@@ -152,6 +158,16 @@
             <span><b>Private key only</b><small>Use when your MDM already pushes the Client ID and Key ID (see below).</small></span></label>
           <label class="choice"><input type="radio" name="mode" value="details">
             <span><b>Details without the key</b><small>Fills in the form; the technician imports the .pem separately.</small></span></label>
+        </div>
+        <div class="lock" id="lockBox">
+          <label class="toggle"><input type="checkbox" id="lockOn" checked>
+            <span><b>Lock with a passcode</b><small>SerialSnap asks for this passcode after scanning. Give it to the technician separately — say it or send it, but never print or store it with the code.</small></span></label>
+          <div class="passcode-row" id="passcodeRow">
+            <input type="text" id="passcode" class="passcode" readonly aria-label="Passcode">
+            <button class="secondary" id="newPasscode" type="button">New</button>
+            <button class="secondary" id="copyPasscode" type="button">Copy</button>
+          </div>
+          <div class="hint" id="passcodeHint"></div>
         </div>
       </section>
 
@@ -203,7 +219,16 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
   "use strict";
   const $ = (id) => document.getElementById(id);
   const REVEAL_SECONDS = 60;
+  // OWASP's PBKDF2-SHA256 minimum. With a 12-character passcode (about 59 bits) guessing
+  // offline takes far longer than the key is worth keeping.
+  const PBKDF2_ITERATIONS = 600000;
+  // No 0/O, 1/I/L lookalikes. SerialSnap ignores case and dashes when the passcode is typed.
+  const PASSCODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+  const PASSCODE_LENGTH = 12;
+  const canLock = !!(window.crypto && crypto.subtle);
   let pem = null;
+  let lockKey = null; // { passcode, salt, key }, so typing elsewhere doesn't re-run PBKDF2
+  let renderToken = 0;
   let revealed = false;
   let countdown = null;
 
@@ -281,6 +306,42 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
     render();
   }
 
+  // Grouped for reading aloud, e.g. 7KQM-3XPA-9TRW.
+  function randomPasscode() {
+    const n = PASSCODE_ALPHABET.length;
+    const limit = 256 - (256 % n); // rejection sampling keeps every character equally likely
+    let out = "";
+    while (out.length < PASSCODE_LENGTH) {
+      for (const byte of crypto.getRandomValues(new Uint8Array(16))) {
+        if (byte < limit && out.length < PASSCODE_LENGTH) out += PASSCODE_ALPHABET[byte % n];
+      }
+    }
+    return out.match(/.{4}/g).join("-");
+  }
+
+  // The key is derived from the passcode without dashes, as SerialSnap normalizes it.
+  const passcodeValue = () => $("passcode").value.replace(/-/g, "");
+  const locking = () => canLock && mode() !== "details" && $("lockOn").checked;
+
+  function bytesToBase64(bytes) {
+    return btoa(String.fromCharCode(...new Uint8Array(bytes)));
+  }
+
+  // {"enc":1,"iter":…,"salt":…,"iv":…,"data":…}: AES-256-GCM with a PBKDF2-SHA256 key; data ends with the tag.
+  async function lock(text) {
+    const passcode = passcodeValue();
+    if (!lockKey || lockKey.passcode !== passcode) {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(passcode), "PBKDF2", false, ["deriveKey"]);
+      const key = await crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt, iterations: PBKDF2_ITERATIONS },
+        base, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+      lockKey = { passcode, salt, key };
+    }
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, lockKey.key, new TextEncoder().encode(text));
+    return JSON.stringify({ enc: 1, iter: PBKDF2_ITERATIONS, salt: bytesToBase64(lockKey.salt), iv: bytesToBase64(iv), data: bytesToBase64(data) });
+  }
+
   function payload() {
     const m = mode();
     if (m === "key") return pem;
@@ -325,9 +386,28 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
     return count;
   }
 
-  function render() {
+  function renderLock() {
+    $("lockBox").hidden = mode() === "details";
+    $("lockOn").disabled = !canLock;
+    $("passcodeRow").hidden = !locking();
+    const hint = $("passcodeHint");
+    if (!canLock) {
+      hint.textContent = "This browser can't encrypt here. Open the page from a file or over HTTPS to lock the code.";
+      hint.className = "hint warn";
+    } else if (!$("lockOn").checked) {
+      hint.textContent = "Without a passcode, anyone who scans the code gets the private key. Don't print it.";
+      hint.className = "hint warn";
+    } else {
+      hint.textContent = "Letters aren't case-sensitive and the dashes are optional. If a printed code and its passcode are both lost, revoke the key in the portal.";
+      hint.className = "hint";
+    }
+  }
+
+  async function render() {
+    const token = ++renderToken;
     $("clientId").placeholder = prefix[orgType()] + "…";
     renderPlist();
+    renderLock();
     const isReady = ready();
     $("toggle").disabled = !isReady;
     $("placeholder").hidden = isReady;
@@ -339,11 +419,14 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
       ctx.clearRect(0, 0, $("qr").width, $("qr").height);
       return;
     }
-    const text = payload();
+    const locked = locking();
+    const text = locked ? await lock(payload()) : payload();
+    if (token !== renderToken) return; // a newer render started while encrypting
     const modules = draw(text);
     const containsKey = mode() !== "details";
-    $("sizeHint").textContent = `${text.length} characters · ${modules}×${modules} modules` + (containsKey ? " · contains the private key" : "");
-    $("sizeHint").className = containsKey ? "hint warn" : "hint";
+    const note = !containsKey ? "" : locked ? " · private key locked with passcode" : " · contains the private key";
+    $("sizeHint").textContent = `${text.length} characters · ${modules}×${modules} modules` + note;
+    $("sizeHint").className = containsKey && !locked ? "hint warn" : "hint";
     // Codes without the key aren't secret, so they can stay visible.
     if (!containsKey) reveal(false); else if (!revealed) hide();
   }
@@ -393,6 +476,8 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
     pem = null;
     $("name").value = $("clientId").value = $("keyId").value = "";
     $("file").value = "";
+    lockKey = null;
+    if (canLock) $("passcode").value = randomPasscode();
     setKey(null, "", "");
     hide();
   }
@@ -410,7 +495,19 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
   $("file").addEventListener("change", (e) => loadFile(e.target.files[0]));
   ["name", "clientId", "keyId"].forEach((id) => $(id).addEventListener("input", render));
   document.querySelectorAll("input[name=orgType], input[name=mode]").forEach((el) => el.addEventListener("change", render));
-  $("toggle").addEventListener("click", () => (revealed ? hide() : reveal(mode() !== "details")));
+  // A locked code can stay up long enough to print; an unlocked one hides itself.
+  $("toggle").addEventListener("click", () => (revealed ? hide() : reveal(mode() !== "details" && !locking())));
+  $("lockOn").addEventListener("change", () => { hide(); render(); });
+  $("newPasscode").addEventListener("click", () => { $("passcode").value = randomPasscode(); render(); });
+  $("copyPasscode").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("passcode").value);
+      $("copyPasscode").textContent = "Copied";
+      setTimeout(() => ($("copyPasscode").textContent = "Copy"), 1500);
+    } catch {
+      $("passcode").select();
+    }
+  });
   $("clear").addEventListener("click", clearAll);
   $("copyPlist").addEventListener("click", async () => {
     try {
@@ -422,8 +519,9 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
     }
   });
   // Hide the key when the page loses visibility, e.g. switching apps during screen sharing.
-  document.addEventListener("visibilitychange", () => { if (document.hidden && mode() !== "details") hide(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && mode() !== "details" && !locking()) hide(); });
 
+  if (canLock) $("passcode").value = randomPasscode();
   render();
 })();
 </script>

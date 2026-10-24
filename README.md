@@ -19,7 +19,7 @@ These fingerprints match the files deployed to serialsnap.devscape.io.
 
 | File | SHA-256 |
 |---|---|
-| `serialsnap-setup.html` | `d540f6c28b27819df0739b44d14f667809708a1fba13d28491e377e1978cde80` |
+| `serialsnap-setup.html` | `e007f5ec784058e9dfd76a796e754af3e8b2a77779f9d7a4e33995a9c9f85f21` |
 | `serialsnap-qr.sh` | `4c273a8343d14415c4d06d46954bf8dacb2e64b92b5fe897cbf307fdbc6b75b8` |
 
 Compare a downloaded copy with:
