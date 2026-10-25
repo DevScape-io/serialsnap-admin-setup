@@ -164,6 +164,7 @@
             <span><b>Lock with a passcode</b><small>SerialSnap asks for this passcode after scanning. Give it to the technician separately — say it or send it, but never print or store it with the code.</small></span></label>
           <div class="passcode-row" id="passcodeRow">
             <input type="text" id="passcode" class="passcode" readonly aria-label="Passcode">
+            <button class="secondary" id="showPasscode" type="button" aria-pressed="false">Show</button>
             <button class="secondary" id="newPasscode" type="button">New</button>
             <button class="secondary" id="copyPasscode" type="button">Copy</button>
           </div>
@@ -320,7 +321,19 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
   }
 
   // The key is derived from the passcode without dashes, as SerialSnap normalizes it.
-  const passcodeValue = () => $("passcode").value.replace(/-/g, "");
+  // The passcode stays masked unless asked for, so one photo of the screen can't capture
+  // both a locked code and the passcode that opens it.
+  let passcode = "";
+  let passcodeShownTimer = null;
+  const setPasscode = (value) => { passcode = value; showPasscode(false); };
+  function showPasscode(show) {
+    clearTimeout(passcodeShownTimer);
+    $("passcode").value = show ? passcode : passcode.replace(/[^-]/g, "•");
+    $("showPasscode").textContent = show ? "Hide" : "Show";
+    $("showPasscode").setAttribute("aria-pressed", String(show));
+    if (show) passcodeShownTimer = setTimeout(() => showPasscode(false), 30000);
+  }
+  const passcodeValue = () => passcode.replace(/-/g, "");
   const locking = () => canLock && mode() !== "details" && $("lockOn").checked;
 
   function bytesToBase64(bytes) {
@@ -329,13 +342,13 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
 
   // {"enc":1,"iter":…,"salt":…,"iv":…,"data":…}: AES-256-GCM with a PBKDF2-SHA256 key; data ends with the tag.
   async function lock(text) {
-    const passcode = passcodeValue();
-    if (!lockKey || lockKey.passcode !== passcode) {
+    const code = passcodeValue();
+    if (!lockKey || lockKey.passcode !== code) {
       const salt = crypto.getRandomValues(new Uint8Array(16));
-      const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(passcode), "PBKDF2", false, ["deriveKey"]);
+      const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(code), "PBKDF2", false, ["deriveKey"]);
       const key = await crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt, iterations: PBKDF2_ITERATIONS },
         base, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
-      lockKey = { passcode, salt, key };
+      lockKey = { passcode: code, salt, key };
     }
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, lockKey.key, new TextEncoder().encode(text));
@@ -477,7 +490,7 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
     $("name").value = $("clientId").value = $("keyId").value = "";
     $("file").value = "";
     lockKey = null;
-    if (canLock) $("passcode").value = randomPasscode();
+    if (canLock) setPasscode(randomPasscode());
     setKey(null, "", "");
     hide();
   }
@@ -498,13 +511,15 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
   // A locked code can stay up long enough to print; an unlocked one hides itself.
   $("toggle").addEventListener("click", () => (revealed ? hide() : reveal(mode() !== "details" && !locking())));
   $("lockOn").addEventListener("change", () => { hide(); render(); });
-  $("newPasscode").addEventListener("click", () => { $("passcode").value = randomPasscode(); render(); });
+  $("newPasscode").addEventListener("click", () => { setPasscode(randomPasscode()); render(); });
+  $("showPasscode").addEventListener("click", () => showPasscode($("passcode").value !== passcode));
   $("copyPasscode").addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText($("passcode").value);
+      await navigator.clipboard.writeText(passcode);
       $("copyPasscode").textContent = "Copied";
       setTimeout(() => ($("copyPasscode").textContent = "Copy"), 1500);
     } catch {
+      showPasscode(true);
       $("passcode").select();
     }
   });
@@ -521,7 +536,7 @@ var qrcode=function(){function i(t,r){function a(t,r){g=function(t){for(var r=ne
   // Hide the key when the page loses visibility, e.g. switching apps during screen sharing.
   document.addEventListener("visibilitychange", () => { if (document.hidden && mode() !== "details" && !locking()) hide(); });
 
-  if (canLock) $("passcode").value = randomPasscode();
+  if (canLock) setPasscode(randomPasscode());
   render();
 })();
 </script>
